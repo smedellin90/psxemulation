@@ -3,3 +3,5 @@ InlayHints:
   ParameterNames: false
   DeducedTypes: false
   Designators: false
+CompileFlags:
+  Add: [-std=c++20]
