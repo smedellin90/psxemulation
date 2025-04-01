@@ -10,20 +10,20 @@ set(HEADERS
 )
 
 # Create executable
-add_executable(ps1emu ${SOURCES} ${HEADERS})
+add_executable(psx_emulation_notes001 ${SOURCES} ${HEADERS})
 
 # Include directories
-target_include_directories(ps1emu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(psx_emulation_notes001 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Set compiler flags
 if(MSVC)
-    target_compile_options(ps1emu PRIVATE /W4)
+    target_compile_options(psx_emulation_notes001 PRIVATE /W4)
 else()
-    target_compile_options(ps1emu PRIVATE -Wall -Wextra -pedantic)
+    target_compile_options(psx_emulation_notes001 PRIVATE -Wall -Wextra -pedantic)
 endif()
 
 # Output binary to bin directory
-set_target_properties(ps1emu
+set_target_properties(psx_emulation_notes001
     PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
