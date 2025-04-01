@@ -219,6 +219,20 @@ void CPU::runCycles(uint32_t count) {
 }
 
 void CPU::triggerException(Exception exception, uint32_t address) {
+    // Save current status register
+    uint32_t status = cp0[CP0_SR];
+    
+    // Shift mode bits:
+    // Current → Previous
+    // Previous → Old
+    uint32_t newStatus = status & 0xFFFFFFE0;  // Clear mode bits
+    newStatus |= ((status & 0x3) << 2);        // Current → Previous
+    newStatus |= ((status >> 2) & 0x3) << 4;   // Previous → Old
+    newStatus |= 0x0;                          // Set current mode to kernel (00)
+    
+    // Store updated status register
+    cp0[CP0_SR] = newStatus;
+    
     // For SYSCALL and BREAKPOINT, we need to use the PC value before it was incremented
     // since the PC has already been advanced to the next instruction during executeInstruction
     if (exception == EXCEPTION_SYSCALL || exception == EXCEPTION_BREAKPOINT) {
@@ -245,8 +259,8 @@ void CPU::triggerException(Exception exception, uint32_t address) {
         cp0[CP0_BADVADDR] = address;
     }
     
-    // Set PC to exception handler
-    pc = (cp0[CP0_SR] & SR_BEV) ? 0xBFC00180 : 0x80000080;
+    // Jump to exception vector at 0xBFC00180
+    pc = 0xBFC00180;
     nextPc = pc + 4;
     delaySlot = false;
 }

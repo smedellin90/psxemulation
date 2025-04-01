@@ -1773,6 +1773,9 @@ void runTests() {
         TestMemory mem;
         setupCPUWithMemory(cpu, mem);
         
+        // Set up initial status register with user mode (bits 1-0 = 11)
+        cpu.setCP0Register(PSX::CPU::CP0_SR, 0x3);
+        
         // Write SYSCALL instruction to memory
         mem.write(0xBFC00000, Encode::R_Type::SYSCALL());
         
@@ -1781,11 +1784,13 @@ void runTests() {
         
         // Print initial state
         std::cout << "Before SYSCALL - PC: 0x" << std::hex << cpu.getPC() << std::endl;
+        std::cout << "Before SYSCALL - SR: 0x" << std::hex << cpu.getCP0Register(PSX::CPU::CP0_SR) << std::endl;
         
         cpu.executeInstruction();  // SYSCALL
         
         // Print state after exception
         std::cout << "After SYSCALL - PC: 0x" << std::hex << cpu.getPC() << std::endl;
+        std::cout << "After SYSCALL - SR: 0x" << std::hex << cpu.getCP0Register(PSX::CPU::CP0_SR) << std::endl;
         std::cout << "EPC: 0x" << std::hex << cpu.getCP0Register(PSX::CPU::CP0_EPC) << std::endl;
         std::cout << "Cause: 0x" << std::hex << cpu.getCP0Register(PSX::CPU::CP0_CAUSE) << std::endl;
         
@@ -1797,14 +1802,22 @@ void runTests() {
                     (PSX::CPU::EXCEPTION_SYSCALL << 2), 
                     "Cause register should indicate syscall exception");
                     
-        // In our implementation, the PC is already advanced to the next instruction
-        // when the exception is triggered, so EPC should be the current PC
+        // Check that EPC contains the SYSCALL instruction address
         runner.check(cpu.getCP0Register(PSX::CPU::CP0_EPC) == 0xBFC00000, 
                     "EPC should contain the address of the SYSCALL instruction");
                     
         // Check that the BD (Branch Delay) bit is not set
         runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & 0x80000000) == 0,
                     "BD bit should not be set for a normal exception");
+                    
+        // Check status register mode bits after SYSCALL
+        uint32_t status = cpu.getCP0Register(PSX::CPU::CP0_SR);
+        runner.check((status & 0x3) == 0, 
+                    "Current mode should be kernel mode (00) after SYSCALL");
+        runner.check(((status >> 2) & 0x3) == 0x3, 
+                    "Previous mode should be user mode (11) after SYSCALL");
+        runner.check(((status >> 4) & 0x3) == 0x0, 
+                    "Old mode should be kernel mode (00) after SYSCALL");
     });
     
     // Test for BLEZ and BGTZ instructions
