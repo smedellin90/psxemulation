@@ -2,11 +2,13 @@
 set(SOURCES
     cpu_core.cpp
     cpu_core_tests.cpp
+    interrupt_controller.cpp
 )
 
 # Specify header files 
 set(HEADERS
     cpu_core.h
+    interrupt_controller.h
 )
 
 # Create executable
