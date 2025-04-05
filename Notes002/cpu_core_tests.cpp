@@ -2054,5 +2054,6 @@ void runTests() {
 int main() {
     std::cout << "Running PlayStation CPU Emulator Tests\n";
     PSXTest::runTests();
+    
     return 0;
 }
