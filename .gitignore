@@ -47,3 +47,4 @@ __pycache__
 /android
 
 .clangd
+compile_commands.json
