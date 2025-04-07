@@ -7,7 +7,6 @@ This directory contains the implementation of a PlayStation memory controller, w
 - Managing access to different memory regions (RAM, ROM, I/O)
 - Providing memory-mapped I/O for other hardware components
 - Basic DMA functionality
-- Cache control support
 
 ## Memory Map
 
@@ -65,6 +64,19 @@ The implementation includes error handling for:
 
 The memory controller provides a basic DMA (Direct Memory Access) interface that allows for efficient data transfer between memory regions without CPU intervention.
 
+## Architectural Design Decisions
+
+### Cache Implementation
+
+The memory controller intentionally does not implement cache functionality. This design decision was made because:
+
+1. In the actual PlayStation hardware, caches are part of the CPU, not the memory controller
+2. Separating cache functionality to the CPU component results in a cleaner, more accurate architecture
+3. This separation of concerns makes the code more maintainable and easier to debug
+4. Memory operations are simplified without cache coherency management
+
+Cache functionality (instruction and data caches) should be implemented in the CPU component for architectural accuracy.
+
 ## Usage
 
 ### Basic Memory Access
@@ -118,11 +130,11 @@ mem.dmaTransfer(0x00000000, 0x00100000, 64);
 
 Future improvements to the memory controller could include:
 
-1. Implementing a proper cache emulation (ICache and DCache)
-2. More accurate timing simulation for memory access
-3. Full implementation of the PlayStation's DMA controller
-4. TLB (Translation Lookaside Buffer) emulation if needed
-5. Support for expansion memory
+1. More accurate timing simulation for memory access
+2. Full implementation of the PlayStation's DMA controller with all channels
+3. Support for expansion memory
+4. Better error reporting and debugging capabilities
+5. Memory access logging for debugging
 
 ## Tests
 
@@ -139,5 +151,5 @@ The implementation includes comprehensive tests covering:
 Run the tests with:
 
 ```
-psx_emulation_memory_tests
+psx_emulation_memory_tests_003
 ``` 
