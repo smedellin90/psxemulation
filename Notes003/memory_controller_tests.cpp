@@ -142,12 +142,12 @@ void runMemoryControllerTests() {
         uint32_t testIoReg = 0x55AAAA55;
         
         // Register a read handler for a test I/O port
-        mem.registerIOReadHandler(0x1F801100, 4, [&testIoReg](uint32_t addr) -> uint32_t {
+        mem.registerIOReadHandler(0x1F801100, 4, [&testIoReg](uint32_t /*addr*/) -> uint32_t {
             return testIoReg;
         });
         
         // Register a write handler for the same port
-        mem.registerIOWriteHandler(0x1F801100, 4, [&testIoReg](uint32_t addr, uint32_t value) {
+        mem.registerIOWriteHandler(0x1F801100, 4, [&testIoReg](uint32_t /*addr*/, uint32_t value) {
             testIoReg = value;
         });
         

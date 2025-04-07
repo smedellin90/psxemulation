@@ -10,8 +10,6 @@ MemoryController::MemoryController(InterruptController* interruptController)
     : mainRam(2 * 1024 * 1024, 0)      // 2MB Main RAM
     , scratchpad(1024, 0)              // 1KB Scratchpad
     , biosRom(512 * 1024, 0)           // 512KB BIOS ROM
-    , iCacheEnabled(false)
-    , dCacheEnabled(false)
     , interruptController(interruptController)
 {
 }
@@ -25,10 +23,6 @@ void MemoryController::reset() {
     
     // Note: BIOS ROM is not cleared on reset
     
-    // Reset cache state
-    iCacheEnabled = false;
-    dCacheEnabled = false;
-    
     // Clear I/O handlers (components should re-register after reset)
     ioHandlers.clear();
 }
@@ -40,19 +34,26 @@ bool MemoryController::loadBios(const std::string& biosPath) {
         return false;
     }
     
-    // Get file size
+    // Check file size
     file.seekg(0, std::ios::end);
     std::streamsize size = file.tellg();
     file.seekg(0, std::ios::beg);
     
-    if (size > biosRom.size()) {
-        std::cerr << "BIOS file too large: " << size << " bytes (max " << biosRom.size() << " bytes)" << std::endl;
+    // Ensure the file size is valid
+    if (size <= 0) {
+        std::cerr << "BIOS file is empty or invalid: " << biosPath << std::endl;
         return false;
     }
     
-    // Read the file
+    // Check if file is larger than our BIOS ROM buffer
+    if (static_cast<size_t>(size) > biosRom.size()) {
+        std::cerr << "BIOS file is too large: " << size << " bytes (max: " << biosRom.size() << " bytes)" << std::endl;
+        return false;
+    }
+    
+    // Read the file into our buffer
     if (!file.read(reinterpret_cast<char*>(biosRom.data()), size)) {
-        std::cerr << "Failed to read BIOS file" << std::endl;
+        std::cerr << "Failed to read BIOS file: " << biosPath << std::endl;
         return false;
     }
     
@@ -223,7 +224,6 @@ uint32_t MemoryController::readWord(uint32_t address) {
     }
     
     // Handle addresses beyond the end of main RAM but still within the addressable physical memory
-    // This is needed for proper mirroring in the memory mapping tests
     else if (physAddr <= 0x007FFFFF) {  // We'll limit to 8MB for reasonable memory mirroring
         // Wrap around within the 2MB RAM, treating it as if addresses repeat
         uint32_t wrappedAddr = physAddr & 0x001FFFFF;  // Mask to 2MB
@@ -377,16 +377,16 @@ void MemoryController::writeHalf(uint32_t address, uint16_t value) {
 }
 
 void MemoryController::writeWord(uint32_t address, uint32_t value) {
-    // Check alignment
-    if (!checkAlignment(address, 4)) {
-        std::cerr << "Unaligned word write: 0x" << std::hex << address << std::endl;
-        // In real hardware this would trigger an exception
-        return;
+    // Check alignment (words must be 4-byte aligned)
+    if (address & 0x3) {
+        std::cerr << "Unaligned word write at 0x" << std::hex << address << std::endl;
+        return; // Ignore the write
     }
     
+    // Physical address translation
     uint32_t physAddr = translateAddress(address);
     
-    // Main RAM: 0x00000000-0x00200000
+    // -- Main RAM: 0x00000000-0x00200000
     if (physAddr < 0x00200000) {
         *reinterpret_cast<uint32_t*>(&mainRam[physAddr]) = value;
         return;
@@ -453,12 +453,12 @@ void MemoryController::registerIOReadHandler(uint32_t baseAddress, uint32_t size
     }
     
     // Add a new handler
-    ioHandlers.push_back({
-        .baseAddress = physAddr,
-        .size = size,
-        .readCB = callback,
-        .writeCB = nullptr,
-    });
+    IOHandler handler;
+    handler.baseAddress = physAddr;
+    handler.size = size;
+    handler.readCB = callback;
+    handler.writeCB = nullptr;
+    ioHandlers.push_back(handler);
 }
 
 void MemoryController::registerIOWriteHandler(uint32_t baseAddress, uint32_t size, WriteCallback callback) {
@@ -483,7 +483,7 @@ void MemoryController::registerIOWriteHandler(uint32_t baseAddress, uint32_t siz
     IOHandler handler;
     handler.baseAddress = physAddr;
     handler.size = size;
-    handler.readCB = nullptr; // Read callback not set
+    handler.readCB = nullptr;
     handler.writeCB = callback;
     ioHandlers.push_back(handler);
 }
@@ -491,21 +491,34 @@ void MemoryController::registerIOWriteHandler(uint32_t baseAddress, uint32_t siz
 void MemoryController::dmaTransfer(uint32_t srcAddress, uint32_t destAddress, uint32_t size) {
     // Basic DMA transfer implementation
     for (uint32_t i = 0; i < size; i += 4) {
-        uint32_t data = readWord(srcAddress + i);
-        writeWord(destAddress + i, data);
+        // For DMA, we want to use uncached access
+        uint32_t srcPhysAddr = translateAddress(srcAddress + i);
+        uint32_t destPhysAddr = translateAddress(destAddress + i);
+        
+        // Read from source directly
+        uint32_t data;
+        
+        // Read directly from physical memory
+        if (srcPhysAddr < 0x00200000) {
+            data = *reinterpret_cast<uint32_t*>(&mainRam[srcPhysAddr]);
+        } else if (srcPhysAddr >= 0x1F800000 && srcPhysAddr < 0x1F800400) {
+            data = *reinterpret_cast<uint32_t*>(&scratchpad[srcPhysAddr - 0x1F800000]);
+        } else if (srcPhysAddr >= 0x1FC00000 && srcPhysAddr < 0x1FC80000) {
+            data = *reinterpret_cast<uint32_t*>(&biosRom[srcPhysAddr - 0x1FC00000]);
+        } else {
+            std::cerr << "Unhandled DMA read from: 0x" << std::hex << srcPhysAddr << std::endl;
+            continue;
+        }
+        
+        // Write to destination directly
+        if (destPhysAddr < 0x00200000) {
+            *reinterpret_cast<uint32_t*>(&mainRam[destPhysAddr]) = data;
+        } else if (destPhysAddr >= 0x1F800000 && destPhysAddr < 0x1F800400) {
+            *reinterpret_cast<uint32_t*>(&scratchpad[destPhysAddr - 0x1F800000]) = data;
+        } else {
+            std::cerr << "Unhandled DMA write to: 0x" << std::hex << destPhysAddr << std::endl;
+        }
     }
-}
-
-void MemoryController::invalidateICache(uint32_t address, uint32_t size) {
-    // Simple cache invalidation - in a real emulator, this would invalidate 
-    // specific cache lines. Here we just note that cache would be affected.
-    std::cout << "Invalidate ICache: 0x" << std::hex << address << ", size: " << size << std::endl;
-}
-
-void MemoryController::invalidateDCache(uint32_t address, uint32_t size) {
-    // Simple cache invalidation - in a real emulator, this would invalidate 
-    // specific cache lines. Here we just note that cache would be affected.
-    std::cout << "Invalidate DCache: 0x" << std::hex << address << ", size: " << size << std::endl;
 }
 
 } // namespace PSX 

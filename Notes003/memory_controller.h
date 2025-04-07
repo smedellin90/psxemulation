@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <functional>
-#include <array>
 #include <vector>
 
 namespace PSX {
@@ -74,12 +73,6 @@ public:
      */
     void dmaTransfer(uint32_t srcAddress, uint32_t destAddress, uint32_t size);
 
-    /**
-     * Cache control functions
-     */
-    void invalidateICache(uint32_t address, uint32_t size);
-    void invalidateDCache(uint32_t address, uint32_t size);
-
 private:
     // Translate virtual address to physical address
     uint32_t translateAddress(uint32_t address) const;
@@ -102,10 +95,6 @@ private:
 
     std::vector<IOHandler> ioHandlers;
 
-    // Cache state (TLB would be here in a more complete implementation)
-    bool iCacheEnabled;
-    bool dCacheEnabled;
-
     // Reference to interrupt controller (for reporting bus errors)
     InterruptController* interruptController;
 
@@ -113,7 +102,6 @@ private:
     static constexpr int RAM_READ_CYCLES = 5;     // Main RAM
     static constexpr int RAM_WRITE_CYCLES = 5;    // Main RAM
     static constexpr int ROM_ACCESS_CYCLES = 8;   // BIOS ROM
-    static constexpr int CACHE_ACCESS_CYCLES = 1; // Cached access
     static constexpr int IO_ACCESS_CYCLES = 10;   // I/O ports (varies in reality)
 };
 
