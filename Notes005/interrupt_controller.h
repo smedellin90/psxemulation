@@ -5,10 +5,13 @@
 
 namespace PSX {
 
+// Forward declaration of CPU class
+class CPU;
+
 // Interrupt Controller class for the PSX
 class InterruptController {
 public:
-    // Interrupt types
+    // Interrupt types and their corresponding bit positions
     enum class InterruptType : uint32_t {
         VBLANK = 0,      // Vertical blank interrupt
         GPU = 1,         // GPU interrupt
@@ -22,11 +25,25 @@ public:
         SPU = 9,         // Sound Processing Unit interrupt
     };
 
-    // Callback type for interrupt state changes
-    using InterruptCallback = std::function<void(bool)>;
+    // CPU interrupt line mapping
+    // Each PlayStation interrupt type is mapped to a specific CPU interrupt line
+    // Based on PlayStation hardware architecture
+    enum class CPUInterruptLine : uint32_t {
+        VBLANK_LINE = 0,       // Line 0 for VBLANK
+        GPU_LINE = 1,          // Line 1 for GPU
+        CDROM_LINE = 2,        // Line 2 for CDROM
+        DMA_LINE = 3,          // Line 3 for DMA
+        TIMER_LINE = 4,        // Line 4 for all Timer interrupts (0,1,2)
+        CONTROLLER_LINE = 5,   // Line 5 for Controller
+        SIO_LINE = 6,          // Line 6 for SIO
+        SPU_LINE = 7           // Line 7 for SPU
+    };
 
     // Constructor
     InterruptController();
+
+    // Connect CPU to the interrupt controller
+    void connectCPU(CPU* cpu);
 
     // Reset the interrupt controller
     void reset();
@@ -40,26 +57,29 @@ public:
     // Get the current interrupt mask
     uint32_t getMask() const;
 
-    // Set the interrupt mask
+    // Set the interrupt mask and update CPU interrupts
     void setMask(uint32_t mask);
 
-    // Acknowledge an interrupt
+    // Acknowledge an interrupt and update CPU
     void acknowledge(InterruptType type);
 
-    // Trigger an interrupt
+    // Trigger an interrupt and update CPU
     void trigger(InterruptType type);
 
-    // Set callback for interrupt state changes
-    void setInterruptCallback(InterruptCallback callback);
-
 private:
-    uint32_t status;  // Current interrupt status
-    uint32_t mask;    // Interrupt mask
-    uint32_t control; // Interrupt control register
-    InterruptCallback onInterruptChange;  // Callback for interrupt state changes
+    // Memory-mapped registers
+    uint32_t status;   // I_STAT - Current interrupt status
+    uint32_t mask;     // I_MASK - Interrupt mask
+    uint32_t control;  // I_CTRL - Interrupt control register
 
-    // Update interrupt state and call callback if needed
-    void updateInterruptState();
+    // Direct reference to the CPU (no callbacks needed anymore)
+    CPU* cpu;
+    
+    // Maps PlayStation interrupt types to CPU interrupt lines
+    static CPUInterruptLine mapInterruptToCPULine(InterruptType type);
+    
+    // Update the CPU's interrupt lines based on current status and mask
+    void updateCPUInterrupts();
 };
 
 } // namespace PSX 

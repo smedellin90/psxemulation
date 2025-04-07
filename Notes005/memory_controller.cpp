@@ -12,6 +12,31 @@ MemoryController::MemoryController(InterruptController* interruptController)
     , biosRom(512 * 1024, 0)           // 512KB BIOS ROM
     , interruptController(interruptController)
 {
+    // Register interrupt controller registers
+    if (interruptController) {
+        // I_STAT - Interrupt Status Register at 0x1F801070
+        registerIOReadHandler(0x1F801070, 4, [interruptController](uint32_t /*address*/) {
+            return interruptController->getStatus();
+        });
+        
+        registerIOWriteHandler(0x1F801070, 4, [interruptController](uint32_t /*address*/, uint32_t value) {
+            // Writing 1s to I_STAT acknowledges (clears) the corresponding interrupts
+            for (int i = 0; i < 10; i++) {
+                if ((value >> i) & 1) {
+                    interruptController->acknowledge(static_cast<InterruptController::InterruptType>(i));
+                }
+            }
+        });
+        
+        // I_MASK - Interrupt Mask Register at 0x1F801074
+        registerIOReadHandler(0x1F801074, 4, [interruptController](uint32_t /*address*/) {
+            return interruptController->getMask();
+        });
+        
+        registerIOWriteHandler(0x1F801074, 4, [interruptController](uint32_t /*address*/, uint32_t value) {
+            interruptController->setMask(value);
+        });
+    }
 }
 
 void MemoryController::reset() {

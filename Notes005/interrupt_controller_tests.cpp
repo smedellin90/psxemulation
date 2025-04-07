@@ -1,116 +1,67 @@
 #include "interrupt_controller.h"
 #include "cpu_core.h"
 #include <iostream>
-#include <functional>
-#include <string>
-#include <vector>
 #include <map>
+#include <vector>
+#include <functional>
 
 namespace PSXTest {
 
-// Test framework class (simplified from cpu_core_tests.cpp)
 class TestRunner {
 private:
-    struct TestCase {
+    struct Test {
         std::string name;
         std::function<void()> testFunc;
     };
     
-    std::vector<TestCase> tests;
-    int passed = 0;
-    int failed = 0;
-    bool currentTestPassed = true;
-    std::string currentTestName;
-    
+    std::vector<Test> tests;
+    int passCount = 0;
+    int failCount = 0;
+    std::string currentTest;
+
 public:
     void addTest(const std::string& name, std::function<void()> testFunc) {
         tests.push_back({name, testFunc});
     }
     
-    void check(bool condition, const std::string& message) {
-        if (!condition) {
-            currentTestPassed = false;
-            std::cout << "  FAIL: " << message << std::endl;
+    bool check(bool condition, const std::string& message) {
+        if (condition) {
+            std::cout << "  ✓ " << message << std::endl;
+            passCount++;
+            return true;
+        } else {
+            std::cout << "  ✗ " << message << std::endl;
+            failCount++;
+            return false;
+        }
+    }
+    
+    template<typename T>
+    bool checkEqual(const T& actual, const T& expected, const std::string& message) {
+        if (actual == expected) {
+            std::cout << "  ✓ " << message << " (Got: 0x" << std::hex << actual << std::dec << ")" << std::endl;
+            passCount++;
+            return true;
+        } else {
+            std::cout << "  ✗ " << message << " (Expected: 0x" << std::hex << expected 
+                      << ", Got: 0x" << actual << std::dec << ")" << std::endl;
+            failCount++;
+            return false;
         }
     }
     
     void runAll() {
         for (const auto& test : tests) {
-            currentTestName = test.name;
-            currentTestPassed = true;
-            
             std::cout << "Running test: " << test.name << std::endl;
-            try {
-                test.testFunc();
-            } catch (const std::exception& e) {
-                currentTestPassed = false;
-                std::cout << "  EXCEPTION: " << e.what() << std::endl;
-            } catch (...) {
-                currentTestPassed = false;
-                std::cout << "  UNKNOWN EXCEPTION" << std::endl;
-            }
-            
-            if (currentTestPassed) {
-                passed++;
-                std::cout << "  PASSED" << std::endl;
-            } else {
-                failed++;
-            }
+            currentTest = test.name;
+            test.testFunc();
+            std::cout << std::endl;
         }
         
-        std::cout << "\nTest Summary:" << std::endl;
-        std::cout << std::dec << "  Total tests: " << tests.size() << std::endl;
-        std::cout << "  Passed: " << passed << std::endl;
-        std::cout << "  Failed: " << failed << std::endl;
-    }
-};
-
-// Simple memory implementation for CPU tests
-class TestMemory {
-private:
-    std::map<uint32_t, uint32_t> contents;
-    PSX::InterruptController* interruptController;
-
-public:
-    TestMemory(PSX::InterruptController* ic) : interruptController(ic) {}
-    
-    uint32_t read(uint32_t address) {
-        // Check for interrupt controller memory-mapped registers
-        if (address == 0x1F801070) {
-            return interruptController->getStatus();
-        } else if (address == 0x1F801074) {
-            return interruptController->getMask();
-        }
-        
-        // Regular memory access
-        address &= ~0x3; // Align to word boundary
-        auto it = contents.find(address);
-        if (it != contents.end()) {
-            return it->second;
-        }
-        return 0; // Return 0 for uninitialized memory
-    }
-
-    void write(uint32_t address, uint32_t value) {
-        // Check for interrupt controller memory-mapped registers
-        if (address == 0x1F801070) {
-            // Writing 1s to I_STAT acknowledges (clears) the corresponding interrupts
-            // We need to determine which bits are being set to 1 and clear those interrupts
-            uint32_t status = interruptController->getStatus();
-            for (int i = 0; i < 10; i++) {
-                if ((value >> i) & 1) {
-                    interruptController->acknowledge(static_cast<PSX::InterruptController::InterruptType>(i));
-                }
-            }
-            return;
-        } else if (address == 0x1F801074) {
-            interruptController->setMask(value);
-            return;
-        }
-        
-        // Regular memory access
-        address &= ~0x3; // Align to word boundary
-        contents[address] = value;
+        std::cout << "=============================================" << std::endl;
+        std::cout << "Test Results: " << passCount << " passed, " << failCount << " failed, " 
+                  << (passCount + failCount) << " total" << std::endl;
+        std::cout << "=============================================" << std::endl;
     }
 };
 
@@ -121,165 +72,182 @@ void runInterruptControllerTests() {
     // Test 1: Basic Initialization
     runner.addTest("Interrupt Controller Initialization", [&runner]() {
         PSX::InterruptController ic;
+        PSX::CPU cpu;
+        
+        // Connect the CPU to the interrupt controller
+        ic.connectCPU(&cpu);
         
         runner.check(ic.getStatus() == 0, "Status should be initialized to 0");
         runner.check(ic.getMask() == 0, "Mask should be initialized to 0");
         runner.check(!ic.isInterruptPending(), "No interrupts should be pending initially");
+        
+        // Check CPU CAUSE register
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & PSX::CPU::CAUSE_IP) == 0, 
+                    "CPU CAUSE register should have no interrupts set initially");
     });
     
     // Test 2: Triggering Interrupts
     runner.addTest("Triggering Interrupts", [&runner]() {
         PSX::InterruptController ic;
+        PSX::CPU cpu;
+        
+        // Connect the CPU to the interrupt controller
+        ic.connectCPU(&cpu);
         
         // Trigger VBLANK interrupt
         ic.trigger(PSX::InterruptController::InterruptType::VBLANK);
         runner.check(ic.getStatus() == 0x1, "VBLANK interrupt bit should be set");
         runner.check(!ic.isInterruptPending(), "Interrupt shouldn't be pending when masked");
         
+        // CPU interrupt line should not be set yet (masked)
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & (1 << 8)) == 0, 
+                    "CPU CAUSE register should not have interrupt bit set when masked");
+        
         // Set mask to enable VBLANK
         ic.setMask(0x1);
         runner.check(ic.isInterruptPending(), "Interrupt should be pending when enabled by mask");
+        
+        // CPU interrupt line should now be set
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & (1 << 8)) != 0, 
+                    "CPU CAUSE register should have interrupt bit set when unmasked");
         
         // Trigger another interrupt (GPU)
         ic.trigger(PSX::InterruptController::InterruptType::GPU);
         runner.check(ic.getStatus() == 0x3, "Both VBLANK and GPU interrupt bits should be set");
         
+        // Both CPU lines should be set
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & ((1 << 8) | (1 << 9))) == ((1 << 8) | (1 << 9)), 
+                    "CPU CAUSE register should have both interrupt bits set");
+        
         // Acknowledge VBLANK interrupt
         ic.acknowledge(PSX::InterruptController::InterruptType::VBLANK);
         runner.check(ic.getStatus() == 0x2, "VBLANK interrupt bit should be cleared");
-        runner.check(!ic.isInterruptPending(), "No enabled interrupts should be pending");
         
-        // Change mask to enable GPU
-        ic.setMask(0x2);
-        runner.check(ic.isInterruptPending(), "GPU interrupt should now be pending");
+        // VBLANK line should be cleared, but GPU still set
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & (1 << 8)) == 0, 
+                    "CPU CAUSE register should have VBLANK bit cleared");
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & (1 << 9)) != 0, 
+                    "CPU CAUSE register should still have GPU bit set");
+        
+        // Still pending because GPU is set and enabled
+        runner.check(ic.isInterruptPending(), "GPU interrupt should still be pending");
+        
+        // Change mask to disable GPU
+        ic.setMask(0x0);
+        
+        // Not pending anymore because all are masked
+        runner.check(!ic.isInterruptPending(), "No interrupts should be pending when all masked");
+        
+        // But CPU line for GPU still set (hardware behavior - lines reflect actual status)
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & (1 << 9)) == 0, 
+                    "CPU CAUSE register should have GPU bit cleared when masked");
     });
     
     // Test 3: Multiple Interrupts
     runner.addTest("Multiple Interrupts", [&runner]() {
         PSX::InterruptController ic;
+        PSX::CPU cpu;
         
-        // Trigger multiple interrupts
+        // Connect the CPU to the interrupt controller
+        ic.connectCPU(&cpu);
+        
+        // Set mask to enable various interrupts
+        ic.setMask(0x1F); // Enable first 5 interrupts
+        
+        // Trigger several interrupts
         ic.trigger(PSX::InterruptController::InterruptType::VBLANK);
+        ic.trigger(PSX::InterruptController::InterruptType::GPU);
         ic.trigger(PSX::InterruptController::InterruptType::TIMER0);
-        ic.trigger(PSX::InterruptController::InterruptType::CDROM);
         
-        // Expected status: bits 0, 2, and 4 set (VBLANK, CDROM, TIMER0)
-        uint32_t expectedStatus = (1 << 0) | (1 << 2) | (1 << 4);
-        runner.check(ic.getStatus() == expectedStatus, "Status should reflect all triggered interrupts");
+        // Check status and pending state
+        runner.check(ic.getStatus() == 0x13, "Status should show all triggered interrupts");
+        runner.check(ic.isInterruptPending(), "Interrupts should be pending");
         
-        // No interrupts enabled yet
-        runner.check(!ic.isInterruptPending(), "No interrupts should be pending when all masked");
-        
-        // Enable TIMER0 only
-        ic.setMask(1 << 4);
-        runner.check(ic.isInterruptPending(), "TIMER0 interrupt should be pending");
-        
-        // Acknowledge TIMER0
-        ic.acknowledge(PSX::InterruptController::InterruptType::TIMER0);
-        runner.check(ic.getStatus() == ((1 << 0) | (1 << 2)), "TIMER0 bit should be cleared");
-        runner.check(!ic.isInterruptPending(), "No interrupts should be pending after acknowledgment");
-    });
-    
-    // Test 4: Interrupt Callback
-    runner.addTest("Interrupt Callback", [&runner]() {
-        PSX::InterruptController ic;
-        bool callbackCalled = false;
-        bool interruptState = false;
-        
-        // Set callback
-        ic.setInterruptCallback([&callbackCalled, &interruptState](bool state) {
-            callbackCalled = true;
-            interruptState = state;
-        });
-        
-        // Trigger an interrupt but keep it masked
-        ic.trigger(PSX::InterruptController::InterruptType::VBLANK);
-        runner.check(callbackCalled, "Callback should be called on interrupt trigger");
-        runner.check(!interruptState, "Interrupt state should be false when masked");
-        
-        // Reset for next test
-        callbackCalled = false;
-        
-        // Enable the interrupt
-        ic.setMask(0x1);
-        runner.check(callbackCalled, "Callback should be called when mask changes");
-        runner.check(interruptState, "Interrupt state should be true when unmasked");
-        
-        // Reset for next test
-        callbackCalled = false;
-        
-        // Acknowledge the interrupt
+        // Check CPU lines
+        // VBLANK: Line 0 (bit 8), GPU: Line 1 (bit 9), TIMER0: Line 4 (bit 12)
+        uint32_t expectedLines = (1 << 8) | (1 << 9) | (1 << 12);
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & 0xFF00) == expectedLines, 
+                    "CPU CAUSE register should have correct interrupt bits set");
+                    
+        // Acknowledge all interrupts
         ic.acknowledge(PSX::InterruptController::InterruptType::VBLANK);
-        runner.check(callbackCalled, "Callback should be called when interrupt acknowledged");
-        runner.check(!interruptState, "Interrupt state should be false after acknowledgment");
+        ic.acknowledge(PSX::InterruptController::InterruptType::GPU);
+        ic.acknowledge(PSX::InterruptController::InterruptType::TIMER0);
+        
+        // Check all cleared
+        runner.check(ic.getStatus() == 0, "All interrupts should be cleared");
+        runner.check(!ic.isInterruptPending(), "No interrupts should be pending");
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & 0xFF00) == 0, 
+                    "CPU CAUSE register should have all interrupt bits cleared");
     });
     
-    // Test 5: Integration with CPU
-    runner.addTest("Integration with CPU", [&runner]() {
+    // Test 4: All Timers to Same CPU Line
+    runner.addTest("Timer Interrupts", [&runner]() {
         PSX::InterruptController ic;
         PSX::CPU cpu;
-        TestMemory mem(&ic);
         
-        // Setup CPU with memory
-        cpu.setMemoryCallbacks(
-            [&mem](uint32_t address) { return mem.read(address); },
-            [&mem](uint32_t address, uint32_t value) { mem.write(address, value); }
-        );
-        cpu.reset();
+        // Connect the CPU to the interrupt controller
+        ic.connectCPU(&cpu);
         
-        // Connect interrupt controller to CPU
-        bool interruptTriggered = false;
-        ic.setInterruptCallback([&cpu, &interruptTriggered](bool state) {
-            cpu.setInterrupt(0, state); // Use bit 0 for simplicity
-            interruptTriggered = state;
-        });
+        // Enable all timer interrupts
+        ic.setMask(0x70); // Bits 4, 5, 6 for TIMER0, TIMER1, TIMER2
         
-        // Enable interrupts in CPU
-        cpu.setCP0Register(PSX::CPU::CP0_SR, PSX::CPU::SR_IEC | (1 << 8)); // IE and IM[0]
+        // Trigger timer interrupts one by one
+        ic.trigger(PSX::InterruptController::InterruptType::TIMER0);
         
-        // Trigger an interrupt
-        ic.setMask(0x1); // Enable VBLANK in interrupt controller
-        ic.trigger(PSX::InterruptController::InterruptType::VBLANK);
-        
-        // Check if interrupt was triggered
-        runner.check(interruptTriggered, "Interrupt should be triggered");
-        
-        // Check if CPU recognizes the interrupt
-        cpu.checkInterrupts();
-        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & PSX::CPU::CAUSE_IP) != 0, 
-                    "CPU CAUSE register should have IP bits set");
+        // Timer0 -> Line 4 (bit 12)
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & (1 << 12)) != 0, 
+                    "CPU CAUSE register should have TIMER line set for TIMER0");
                     
-        // Write to I_STAT to acknowledge interrupt
-        mem.write(0x1F801070, 0x1); // Acknowledge VBLANK
+        ic.trigger(PSX::InterruptController::InterruptType::TIMER1);
         
-        // Verify interrupt is cleared
-        runner.check(!ic.isInterruptPending(), "Interrupt should be cleared after acknowledgment");
-        runner.check(!interruptTriggered, "Interrupt callback should indicate no pending interrupt");
+        // Line still the same - all timers map to the same line
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & (1 << 12)) != 0, 
+                    "CPU CAUSE register should have TIMER line set for TIMER1");
+                   
+        // Acknowledge TIMER0
+        ic.acknowledge(PSX::InterruptController::InterruptType::TIMER0);
+        
+        // Line still set because TIMER1 is still active
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & (1 << 12)) != 0, 
+                    "CPU CAUSE register should still have TIMER line set after TIMER0 acknowledgment");
+                    
+        // Acknowledge TIMER1
+        ic.acknowledge(PSX::InterruptController::InterruptType::TIMER1);
+        
+        // Now the line should be clear
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & (1 << 12)) == 0, 
+                    "CPU CAUSE register should have TIMER line clear after all timer acknowledgments");
     });
     
-    // Test 6: Memory-Mapped Registers
-    runner.addTest("Memory-Mapped Registers", [&runner]() {
+    // Test 5: Reset Function
+    runner.addTest("Reset Function", [&runner]() {
         PSX::InterruptController ic;
-        TestMemory mem(&ic);
+        PSX::CPU cpu;
         
-        // Set some interrupt state
+        // Connect the CPU to the interrupt controller
+        ic.connectCPU(&cpu);
+        
+        // Setup some interrupts and mask
+        ic.setMask(0x3);
         ic.trigger(PSX::InterruptController::InterruptType::VBLANK);
-        ic.setMask(0x3); // Enable VBLANK and GPU
+        ic.trigger(PSX::InterruptController::InterruptType::GPU);
         
-        // Read registers through memory interface
-        uint32_t readStatus = mem.read(0x1F801070);
-        uint32_t readMask = mem.read(0x1F801074);
+        // Verify they're set
+        runner.check(ic.getStatus() == 0x3, "Interrupts should be set before reset");
+        runner.check(ic.getMask() == 0x3, "Mask should be set before reset");
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & ((1 << 8) | (1 << 9))) != 0, 
+                    "CPU CAUSE register should have interrupt bits set before reset");
         
-        runner.check(readStatus == 0x1, "Reading I_STAT should return correct value");
-        runner.check(readMask == 0x3, "Reading I_MASK should return correct value");
+        // Reset the controller
+        ic.reset();
         
-        // Write to registers through memory interface
-        mem.write(0x1F801074, 0x5); // Enable VBLANK and TIMER0
-        runner.check(ic.getMask() == 0x5, "Writing to I_MASK should update mask");
-        
-        // Acknowledge via memory write
-        mem.write(0x1F801070, 0x1); // Acknowledge VBLANK
-        runner.check(ic.getStatus() == 0x0, "Writing to I_STAT should acknowledge interrupts");
+        // Verify all cleared
+        runner.check(ic.getStatus() == 0, "Status should be 0 after reset");
+        runner.check(ic.getMask() == 0, "Mask should be 0 after reset");
+        runner.check(!ic.isInterruptPending(), "No interrupts should be pending after reset");
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & 0xFF00) == 0, 
+                    "CPU CAUSE register should have no interrupts set after reset");
     });
     
     runner.runAll();
