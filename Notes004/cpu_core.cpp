@@ -18,7 +18,12 @@ const std::array<std::string, CPU::REG_COUNT> CPU::REG_NAMES = {
 CPU::CPU()
     : pc(0), nextPc(0), hi(0), lo(0), delaySlot(false),
       memoryRead(nullptr), memoryWrite(nullptr),
+      iCacheEnabled(true), dCacheEnabled(true),
       cycles(0), currentInstruction(0), running(false) {
+    // Initialize cache structures
+    iCache.resize(ICACHE_LINES);
+    dCache.resize(DCACHE_LINES);
+    
     reset();
 }
 
@@ -50,6 +55,15 @@ void CPU::reset() {
     currentInstruction = 0;
     running = true;
     
+    // Reset caches
+    invalidateICache();
+    invalidateDCache();
+    resetCacheStats();
+    
+    // Enable caches by default
+    iCacheEnabled = true;
+    dCacheEnabled = true;
+    
     // Set processor ID register
     cp0[CP0_PRID] = 0x00000002;  // CPU processor
     
@@ -77,16 +91,61 @@ uint32_t CPU::getCP0Register(CP0Register reg) const {
 }
 
 void CPU::setCP0Register(CP0Register reg, uint32_t value) {
+    // Special handling for Status Register
+    if (reg == CP0_SR) {
+        // Extract cache control bits
+        bool isolate = (value & SR_ISC) != 0;
+        bool swap = (value & SR_SWC) != 0;
+        isolateCache(isolate);
+        swapCaches(swap);
+    }
+    
     cp0[reg] = value;
 }
 
+uint32_t CPU::readMemoryDirect(uint32_t address) {
+    if (!memoryRead) {
+        std::cerr << "Memory read callback not set" << std::endl;
+        return 0;
+    }
+    return memoryRead(address);
+}
+
+void CPU::writeMemoryDirect(uint32_t address, uint32_t value) {
+    if (!memoryWrite) {
+        std::cerr << "Memory write callback not set" << std::endl;
+        return;
+    }
+    memoryWrite(address, value);
+}
+
 uint8_t CPU::readByte(uint32_t address) {
-    // return memoryRead(address) & 0xFF;
-    uint32_t word = memoryRead(address & ~0x3);  // Read aligned word
-    int byteOffset = address & 0x3;              // Get byte offset (0-3)
+    uint32_t alignedAddr = address & ~0x3;
+    uint32_t wordData;
     
-    // Extract the right byte based on little-endian ordering
-    return (word >> (byteOffset * 8)) & 0xFF;
+    // Check if data is in cache
+    if (dCacheEnabled && !isDCacheEnabled()) {
+        // If data cache is isolated, only access cache, not memory
+        if (!checkDCache(alignedAddr, wordData)) {
+            return 0xFF; // Cache miss in isolated mode returns garbage
+        }
+    } else if (dCacheEnabled && checkDCache(alignedAddr, wordData)) {
+        // Cache hit
+        cacheStats.dCacheHits++;
+    } else {
+        // Cache miss or cache disabled
+        if (dCacheEnabled) {
+            cacheStats.dCacheMisses++;
+        }
+        wordData = readMemoryDirect(alignedAddr);
+        if (dCacheEnabled) {
+            updateDCache(alignedAddr, wordData);
+        }
+    }
+    
+    // Extract appropriate byte
+    int byteOffset = address & 0x3;
+    return (wordData >> (byteOffset * 8)) & 0xFF;
 }
 
 uint16_t CPU::readHalf(uint32_t address) {
@@ -96,15 +155,32 @@ uint16_t CPU::readHalf(uint32_t address) {
         return 0;
     }
     
-    // Get the aligned word containing the halfword
-    uint32_t alignedAddress = address & ~0x3;
-    uint32_t word = memoryRead(alignedAddress);
+    uint32_t alignedAddr = address & ~0x3;
+    uint32_t wordData;
     
-    // Calculate halfword position (0 or 1)
-    int halfPos = (address & 0x2) >> 1;
+    // Check if data is in cache
+    if (dCacheEnabled && !isDCacheEnabled()) {
+        // If data cache is isolated, only access cache, not memory
+        if (!checkDCache(alignedAddr, wordData)) {
+            return 0xFFFF; // Cache miss in isolated mode returns garbage
+        }
+    } else if (dCacheEnabled && checkDCache(alignedAddr, wordData)) {
+        // Cache hit
+        cacheStats.dCacheHits++;
+    } else {
+        // Cache miss or cache disabled
+        if (dCacheEnabled) {
+            cacheStats.dCacheMisses++;
+        }
+        wordData = readMemoryDirect(alignedAddr);
+        if (dCacheEnabled) {
+            updateDCache(alignedAddr, wordData);
+        }
+    }
     
-    // Extract the halfword
-    return (word >> (halfPos * 16)) & 0xFFFF;
+    // Extract appropriate half-word
+    int halfOffset = (address & 0x2) >> 1;
+    return (wordData >> (halfOffset * 16)) & 0xFFFF;
 }
 
 uint32_t CPU::readWord(uint32_t address) {
@@ -113,27 +189,50 @@ uint32_t CPU::readWord(uint32_t address) {
         triggerException(EXCEPTION_ADDRESS_ERROR_LOAD, address);
         return 0;
     }
-    return memoryRead(address);
+    
+    uint32_t wordData;
+    
+    // Check if data is in cache
+    if (dCacheEnabled && !isDCacheEnabled()) {
+        // If data cache is isolated, only access cache, not memory
+        if (!checkDCache(address, wordData)) {
+            return 0xFFFFFFFF; // Cache miss in isolated mode returns garbage
+        }
+    } else if (dCacheEnabled && checkDCache(address, wordData)) {
+        // Cache hit
+        cacheStats.dCacheHits++;
+    } else {
+        // Cache miss or cache disabled
+        if (dCacheEnabled) {
+            cacheStats.dCacheMisses++;
+        }
+        wordData = readMemoryDirect(address);
+        if (dCacheEnabled) {
+            updateDCache(address, wordData);
+        }
+    }
+    
+    return wordData;
 }
 
 void CPU::writeByte(uint32_t address, uint8_t value) {
-    // Get the aligned word address
-    uint32_t alignedAddress = address & ~0x3;
+    uint32_t alignedAddr = address & ~0x3;
+    uint32_t wordData;
     
-    // Read the current word
-    uint32_t wordValue = memoryRead(alignedAddress);
+    if (dCacheEnabled && checkDCache(alignedAddr, wordData)) {
+        // If in cache, update it
+        int byteOffset = address & 0x3;
+        uint32_t mask = ~(0xFF << (byteOffset * 8));
+        wordData = (wordData & mask) | (static_cast<uint32_t>(value) << (byteOffset * 8));
+        updateDCache(alignedAddr, wordData);
+    }
     
-    // Calculate byte position (for little-endian memory)
-    int bytePos = address & 0x3;
-    
-    // Create a mask to clear the byte we want to modify
-    uint32_t mask = ~(0xFF << (bytePos * 8));
-    
-    // Clear the byte and insert the new value
-    wordValue = (wordValue & mask) | (static_cast<uint32_t>(value) << (bytePos * 8));
-    
-    // Write back the modified word
-    memoryWrite(alignedAddress, wordValue);
+    // Always write to memory (write-through policy)
+    wordData = readMemoryDirect(alignedAddr);
+    int byteOffset = address & 0x3;
+    uint32_t mask = ~(0xFF << (byteOffset * 8));
+    wordData = (wordData & mask) | (static_cast<uint32_t>(value) << (byteOffset * 8));
+    writeMemoryDirect(alignedAddr, wordData);
 }
 
 void CPU::writeHalf(uint32_t address, uint16_t value) {
@@ -143,23 +242,23 @@ void CPU::writeHalf(uint32_t address, uint16_t value) {
         return;
     }
     
-    // Get the aligned word address
-    uint32_t alignedAddress = address & ~0x3;
+    uint32_t alignedAddr = address & ~0x3;
+    uint32_t wordData;
     
-    // Read the current word
-    uint32_t wordValue = memoryRead(alignedAddress);
+    if (dCacheEnabled && checkDCache(alignedAddr, wordData)) {
+        // If in cache, update it
+        int halfOffset = (address & 0x2) >> 1;
+        uint32_t mask = ~(0xFFFF << (halfOffset * 16));
+        wordData = (wordData & mask) | (static_cast<uint32_t>(value) << (halfOffset * 16));
+        updateDCache(alignedAddr, wordData);
+    }
     
-    // Calculate halfword position (0 or 1)
-    int halfPos = (address & 0x2) >> 1;
-    
-    // Create a mask to clear the halfword we want to modify
-    uint32_t mask = ~(0xFFFF << (halfPos * 16));
-    
-    // Clear the halfword and insert the new value
-    wordValue = (wordValue & mask) | (static_cast<uint32_t>(value) << (halfPos * 16));
-    
-    // Write back the modified word
-    memoryWrite(alignedAddress, wordValue);
+    // Always write to memory (write-through policy)
+    wordData = readMemoryDirect(alignedAddr);
+    int halfOffset = (address & 0x2) >> 1;
+    uint32_t mask = ~(0xFFFF << (halfOffset * 16));
+    wordData = (wordData & mask) | (static_cast<uint32_t>(value) << (halfOffset * 16));
+    writeMemoryDirect(alignedAddr, wordData);
 }
 
 void CPU::writeWord(uint32_t address, uint32_t value) {
@@ -168,7 +267,212 @@ void CPU::writeWord(uint32_t address, uint32_t value) {
         triggerException(EXCEPTION_ADDRESS_ERROR_STORE, address);
         return;
     }
-    memoryWrite(address, value);
+    
+    if (dCacheEnabled) {
+        // Update cache if enabled (write-through)
+        updateDCache(address, value);
+    }
+    
+    // Always write to memory
+    writeMemoryDirect(address, value);
+}
+
+uint32_t CPU::fetchInstruction(uint32_t address) {
+    if (address & 0x3) {
+        // Handle address error exception
+        triggerException(EXCEPTION_ADDRESS_ERROR_LOAD, address);
+        return 0;
+    }
+    
+    uint32_t instructionData;
+    
+    // Check if instruction is in cache
+    if (iCacheEnabled && !isICacheEnabled()) {
+        // If instruction cache is isolated, only access cache, not memory
+        if (!checkICache(address, instructionData)) {
+            return 0; // Cache miss in isolated mode returns garbage
+        }
+    } else if (iCacheEnabled && checkICache(address, instructionData)) {
+        // Cache hit
+        cacheStats.iCacheHits++;
+    } else {
+        // Cache miss or cache disabled
+        if (iCacheEnabled) {
+            cacheStats.iCacheMisses++;
+        }
+        instructionData = readMemoryDirect(address);
+        if (iCacheEnabled) {
+            updateICache(address, instructionData);
+        }
+    }
+    
+    return instructionData;
+}
+
+void CPU::invalidateICache() {
+    for (auto& line : iCache) {
+        line.valid = false;
+    }
+}
+
+void CPU::invalidateDCache() {
+    for (auto& line : dCache) {
+        line.valid = false;
+    }
+}
+
+void CPU::isolateCache(bool isolate) {
+    if (isolate) {
+        cp0[CP0_SR] |= SR_ISC;
+    } else {
+        cp0[CP0_SR] &= ~SR_ISC;
+    }
+}
+
+void CPU::swapCaches(bool swap) {
+    if (swap) {
+        cp0[CP0_SR] |= SR_SWC;
+        // When swapped, ICache acts as DCache and vice versa
+        // This affects the isCacheEnabled() checks
+    } else {
+        cp0[CP0_SR] &= ~SR_SWC;
+    }
+}
+
+bool CPU::isCacheEnabled() const {
+    return iCacheEnabled || dCacheEnabled;
+}
+
+bool CPU::isICacheEnabled() const {
+    bool swapped = (cp0[CP0_SR] & SR_SWC) != 0;
+    bool isolated = (cp0[CP0_SR] & SR_ISC) != 0;
+    
+    // When swapped, check opposite cache's enabled status
+    return swapped ? dCacheEnabled : (iCacheEnabled && !isolated);
+}
+
+bool CPU::isDCacheEnabled() const {
+    bool swapped = (cp0[CP0_SR] & SR_SWC) != 0;
+    bool isolated = (cp0[CP0_SR] & SR_ISC) != 0;
+    
+    // When swapped, check opposite cache's enabled status
+    return swapped ? iCacheEnabled : (dCacheEnabled && !isolated);
+}
+
+void CPU::resetCacheStats() {
+    cacheStats.reset();
+}
+
+CPU::CacheStats CPU::getCacheStats() const {
+    return cacheStats;
+}
+
+bool CPU::checkICache(uint32_t address, uint32_t& data) {
+    // Only check cached memory regions (KSEG0 and KUSEG)
+    if ((address & 0xE0000000) == 0xA0000000) {
+        return false; // KSEG1 is uncached
+    }
+    
+    uint32_t tag = address >> 4;
+    uint32_t index = (address >> 4) & (ICACHE_LINES - 1);
+    
+    // Check if cache line is valid and tag matches
+    if (iCache[index].valid && iCache[index].tag == tag) {
+        // Assemble the word from the cache line
+        uint32_t offset = address & 0xF;
+        data = 0;
+        for (int i = 0; i < 4; i++) {
+            data |= static_cast<uint32_t>(iCache[index].data[offset + i]) << (i * 8);
+        }
+        return true;
+    }
+    
+    return false;
+}
+
+bool CPU::checkDCache(uint32_t address, uint32_t& data) {
+    // Only check cached memory regions (KSEG0 and KUSEG)
+    if ((address & 0xE0000000) == 0xA0000000) {
+        return false; // KSEG1 is uncached
+    }
+    
+    uint32_t tag = address >> 4;
+    uint32_t index = (address >> 4) & (DCACHE_LINES - 1);
+    
+    // Check if cache line is valid and tag matches
+    if (dCache[index].valid && dCache[index].tag == tag) {
+        // Assemble the word from the cache line
+        uint32_t offset = address & 0xF;
+        data = 0;
+        for (int i = 0; i < 4; i++) {
+            data |= static_cast<uint32_t>(dCache[index].data[offset + i]) << (i * 8);
+        }
+        return true;
+    }
+    
+    return false;
+}
+
+void CPU::updateICache(uint32_t address, uint32_t data) {
+    // Only cache specific memory regions (KSEG0 and KUSEG)
+    if ((address & 0xE0000000) == 0xA0000000) {
+        return; // KSEG1 is uncached
+    }
+    
+    uint32_t tag = address >> 4;
+    uint32_t index = (address >> 4) & (ICACHE_LINES - 1);
+    uint32_t offset = address & 0xF;
+    
+    // If we're updating a partial cache line or it's invalid, load the entire line from memory
+    if (!iCache[index].valid || iCache[index].tag != tag) {
+        // Load the entire cache line from memory
+        uint32_t lineStartAddr = address & ~0xF;
+        for (int i = 0; i < CACHE_LINE_SIZE; i += 4) {
+            uint32_t wordData = readMemoryDirect(lineStartAddr + i);
+            for (int j = 0; j < 4; j++) {
+                iCache[index].data[i + j] = (wordData >> (j * 8)) & 0xFF;
+            }
+        }
+        
+        iCache[index].tag = tag;
+        iCache[index].valid = true;
+    } else {
+        // Just update the specific word
+        for (int i = 0; i < 4; i++) {
+            iCache[index].data[offset + i] = (data >> (i * 8)) & 0xFF;
+        }
+    }
+}
+
+void CPU::updateDCache(uint32_t address, uint32_t data) {
+    // Only cache specific memory regions (KSEG0 and KUSEG)
+    if ((address & 0xE0000000) == 0xA0000000) {
+        return; // KSEG1 is uncached
+    }
+    
+    uint32_t tag = address >> 4;
+    uint32_t index = (address >> 4) & (DCACHE_LINES - 1);
+    uint32_t offset = address & 0xF;
+    
+    // If we're updating a partial cache line or it's invalid, load the entire line from memory
+    if (!dCache[index].valid || dCache[index].tag != tag) {
+        // Load the entire cache line from memory
+        uint32_t lineStartAddr = address & ~0xF;
+        for (int i = 0; i < CACHE_LINE_SIZE; i += 4) {
+            uint32_t wordData = readMemoryDirect(lineStartAddr + i);
+            for (int j = 0; j < 4; j++) {
+                dCache[index].data[i + j] = (wordData >> (j * 8)) & 0xFF;
+            }
+        }
+        
+        dCache[index].tag = tag;
+        dCache[index].valid = true;
+    }
+    
+    // Update the specific word
+    for (int i = 0; i < 4; i++) {
+        dCache[index].data[offset + i] = (data >> (i * 8)) & 0xFF;
+    }
 }
 
 void CPU::executeInstruction() {
@@ -176,8 +480,8 @@ void CPU::executeInstruction() {
         return;
     }
 
-    // Fetch instruction from memory
-    currentInstruction = readWord(pc);
+    // Fetch instruction from memory using instruction cache
+    currentInstruction = fetchInstruction(pc);
 
     // Remember if we're in a delay slot for this instruction
     bool wasInDelaySlot = delaySlot;
@@ -199,13 +503,10 @@ void CPU::executeInstruction() {
     // if we were in a delay slot, we need to jump to the branch target now
     if (wasInDelaySlot) {
         pc = branchTarget;
-        nextPc = pc + 4;
+        nextPc = branchTarget + 4;
     }
-
-    // Ensure R0 stays 0
-    gpr[R0] = 0;
     
-    // Update cycle count
+    // Increment cycle count
     cycles++;
 
     // Check for interrupts

@@ -2,10 +2,8 @@
 #include "interrupt_controller.h"
 #include <iostream>
 #include <cassert>
-#include <memory>
 #include <string>
 #include <functional>
-#include <vector>
 
 namespace PSXTest {
 

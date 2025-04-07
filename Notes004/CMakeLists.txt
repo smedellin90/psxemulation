@@ -33,20 +33,30 @@ add_executable(psx_emulation_memory_tests_004
     ${HEADERS}
 )
 
+# Create CPU-Memory Controller integration tests executable
+add_executable(psx_emulation_cpu_memory_cache_tests_004
+    ${COMMON_SOURCES} 
+    cpu_memory_controller_and_cache_tests.cpp
+    ${HEADERS}
+)
+
 # Include directories (for all executables)
 target_include_directories(psx_emulation_cpu_tests_004 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(psx_emulation_interrupt_tests_004 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(psx_emulation_memory_tests_004 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(psx_emulation_cpu_memory_cache_tests_004 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Set compiler flags (for all executables)
 if(MSVC)
     target_compile_options(psx_emulation_cpu_tests_004 PRIVATE /W4)
     target_compile_options(psx_emulation_interrupt_tests_004 PRIVATE /W4)
     target_compile_options(psx_emulation_memory_tests_004 PRIVATE /W4)
+    target_compile_options(psx_emulation_cpu_memory_cache_tests_004 PRIVATE /W4)
 else()
     target_compile_options(psx_emulation_cpu_tests_004 PRIVATE -Wall -Wextra -pedantic)
     target_compile_options(psx_emulation_interrupt_tests_004 PRIVATE -Wall -Wextra -pedantic)
     target_compile_options(psx_emulation_memory_tests_004 PRIVATE -Wall -Wextra -pedantic)
+    target_compile_options(psx_emulation_cpu_memory_cache_tests_004 PRIVATE -Wall -Wextra -pedantic)
 endif()
 
 # Output binaries to bin directory
@@ -61,6 +71,11 @@ set_target_properties(psx_emulation_interrupt_tests_004
 )
 
 set_target_properties(psx_emulation_memory_tests_004
+    PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+set_target_properties(psx_emulation_cpu_memory_cache_tests_004
     PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )

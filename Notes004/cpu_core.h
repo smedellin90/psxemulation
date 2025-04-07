@@ -4,6 +4,7 @@
 #include <functional>
 #include <array>
 #include <string>
+#include <vector>
 
 namespace PSX {
 
@@ -73,6 +74,13 @@ public:
     static constexpr uint32_t CAUSE_IP = (0xFF << 8);       // Interrupt pending
     static constexpr uint32_t CAUSE_BD = (1 << 31);         // Branch delay slot
 
+    // Cache constants
+    static constexpr int ICACHE_SIZE = 4096;           // 4KB Instruction Cache
+    static constexpr int DCACHE_SIZE = 1024;           // 1KB Data Cache
+    static constexpr int CACHE_LINE_SIZE = 16;         // 16 bytes per cache line
+    static constexpr int ICACHE_LINES = ICACHE_SIZE / CACHE_LINE_SIZE;  // 256 lines
+    static constexpr int DCACHE_LINES = DCACHE_SIZE / CACHE_LINE_SIZE;  // 64 lines
+
 public:
     CPU();
     ~CPU();
@@ -110,6 +118,36 @@ public:
     void writeHalf(uint32_t address, uint16_t value);
     void writeWord(uint32_t address, uint32_t value);
 
+    // Instruction fetch - separate from data reads
+    uint32_t fetchInstruction(uint32_t address);
+
+    // Cache control methods
+    void invalidateICache();
+    void invalidateDCache();
+    void isolateCache(bool isolate);
+    void swapCaches(bool swap);
+    bool isCacheEnabled() const;
+    bool isICacheEnabled() const;
+    bool isDCacheEnabled() const;
+
+    // Cache statistics (for debugging)
+    struct CacheStats {
+        uint32_t iCacheHits;
+        uint32_t iCacheMisses;
+        uint32_t dCacheHits;
+        uint32_t dCacheMisses;
+
+        void reset() {
+            iCacheHits = iCacheMisses = dCacheHits = dCacheMisses = 0;
+        }
+    };
+
+    // Reset cache statistics
+    void resetCacheStats();
+    
+    // Get cache statistics
+    CacheStats getCacheStats() const;
+
     // Register access methods
     uint32_t getRegister(Register reg) const;
     void setRegister(Register reg, uint32_t value);
@@ -144,6 +182,16 @@ private:
     void executeCoprocessor0(uint32_t instruction);
     void executeCoprocessor2(uint32_t instruction);
 
+    // Cache implementations
+    bool checkICache(uint32_t address, uint32_t& data);
+    bool checkDCache(uint32_t address, uint32_t& data);
+    void updateICache(uint32_t address, uint32_t data);
+    void updateDCache(uint32_t address, uint32_t data);
+    
+    // Direct memory access (bypass cache)
+    uint32_t readMemoryDirect(uint32_t address);
+    void writeMemoryDirect(uint32_t address, uint32_t value);
+
 private:
     // CPU state
     std::array<uint32_t, REG_COUNT> gpr;  // General purpose registers
@@ -152,11 +200,24 @@ private:
     uint32_t hi;                          // High result register
     uint32_t lo;                          // Low result register
     std::array<uint32_t, 16> cp0;         // Coprocessor 0 registers
-    bool delaySlot;                      // Whether we're in a branch delay slot
+    bool delaySlot;                       // Whether we're in a branch delay slot
     
     // Memory interface
     MemoryReadCallback memoryRead;
     MemoryWriteCallback memoryWrite;
+    
+    // Cache structures
+    struct CacheLine {
+        uint32_t tag;                   // Address tag
+        bool valid;                     // Valid bit
+        std::array<uint8_t, CACHE_LINE_SIZE> data; // Cache line data
+    };
+    
+    std::vector<CacheLine> iCache;      // Instruction cache
+    std::vector<CacheLine> dCache;      // Data cache
+    bool iCacheEnabled;                 // Instruction cache enabled
+    bool dCacheEnabled;                 // Data cache enabled
+    CacheStats cacheStats;              // Cache statistics
     
     // Statistics and runtime state
     uint64_t cycles;                      // Total executed cycles
