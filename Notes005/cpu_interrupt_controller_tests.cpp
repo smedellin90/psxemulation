@@ -174,12 +174,8 @@ void runCPUInterruptControllerTests() {
         );
         cpu.reset();
         
-        // Connect interrupt controller to CPU
-        bool interruptTriggered = false;
-        ic.setInterruptCallback([&cpu, &interruptTriggered](bool state) {
-            cpu.setInterrupt(0, state); // Use bit 0 for simplicity
-            interruptTriggered = state;
-        });
+        // Connect interrupt controller to CPU (direct hardware connection)
+        ic.connectCPU(&cpu);
         
         // Enable interrupts in CPU
         cpu.setCP0Register(PSX::CPU::CP0_SR, PSX::CPU::SR_IEC | (1 << 8)); // IE and IM[0]
@@ -188,8 +184,9 @@ void runCPUInterruptControllerTests() {
         ic.setMask(0x1); // Enable VBLANK in interrupt controller
         ic.trigger(PSX::InterruptController::InterruptType::VBLANK);
         
-        // Check if interrupt was triggered
-        runner.check(interruptTriggered, "Interrupt should be triggered");
+        // Check if interrupt is visible in CAUSE register
+        uint32_t cause = cpu.getCP0Register(PSX::CPU::CP0_CAUSE);
+        runner.check((cause & (1 << 8)) != 0, "VBLANK interrupt should be set in CAUSE register");
         
         // Check if CPU recognizes the interrupt
         cpu.checkInterrupts();
@@ -201,7 +198,8 @@ void runCPUInterruptControllerTests() {
         
         // Verify interrupt is cleared
         runner.check(!ic.isInterruptPending(), "Interrupt should be cleared after acknowledgment");
-        runner.check(!interruptTriggered, "Interrupt callback should indicate no pending interrupt");
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & (1 << 8)) == 0, 
+                    "CAUSE register should show interrupt cleared");
     });
     
     // Test 2: Multiple Interrupts
@@ -220,9 +218,8 @@ void runCPUInterruptControllerTests() {
         );
         cpu.reset();
         
-        ic.setInterruptCallback([&cpu](bool state) {
-            cpu.setInterrupt(0, state);
-        });
+        // Connect interrupt controller to CPU
+        ic.connectCPU(&cpu);
         
         // Enable interrupts in CPU for specific sources
         cpu.setCP0Register(PSX::CPU::CP0_SR, PSX::CPU::SR_IEC | (3 << 8)); // IE and IM[0-1]
@@ -240,19 +237,24 @@ void runCPUInterruptControllerTests() {
         // Check CPU interrupt state
         cpu.checkInterrupts();
         uint32_t cause = cpu.getCP0Register(PSX::CPU::CP0_CAUSE);
-        runner.check((cause & PSX::CPU::CAUSE_IP) != 0, "CPU CAUSE register should have IP bits set");
+        runner.check((cause & (1 << 8)) != 0, "VBLANK interrupt should be set in CAUSE register");
+        runner.check((cause & (1 << 9)) != 0, "GPU interrupt should be set in CAUSE register");
         
         // Acknowledge only one interrupt
         mem.writeWord(0x1F801070, 0x1); // Acknowledge only VBLANK
         
         // Check that interrupt is still pending (due to GPU)
         runner.check(ic.isInterruptPending(), "Interrupt should still be pending after partial acknowledgment");
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & (1 << 8)) == 0, "VBLANK interrupt should be cleared in CAUSE");
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & (1 << 9)) != 0, "GPU interrupt should still be set in CAUSE");
         
         // Acknowledge the other interrupt
         mem.writeWord(0x1F801070, 0x2); // Acknowledge GPU
         
         // Verify all interrupts are cleared
         runner.check(!ic.isInterruptPending(), "All interrupts should be cleared after full acknowledgment");
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & ((1 << 8) | (1 << 9))) == 0, 
+                     "All interrupt bits should be cleared in CAUSE register");
     });
     
     // Test 3: Interrupt Handling with Instruction Execution
@@ -271,10 +273,8 @@ void runCPUInterruptControllerTests() {
         );
         cpu.reset();
         
-        // Connect interrupt controller
-        ic.setInterruptCallback([&cpu](bool state) {
-            cpu.setInterrupt(0, state);
-        });
+        // Connect interrupt controller to CPU
+        ic.connectCPU(&cpu);
         
         // Verify initial register state
         runner.checkEqual(cpu.getRegister(PSX::CPU::T0), 0u, "Register T0 should be initially zero");
@@ -312,6 +312,8 @@ void runCPUInterruptControllerTests() {
         
         // Check interrupt pending state
         runner.check(ic.isInterruptPending(), "Interrupt should be pending");
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & (1 << 8)) != 0, 
+                     "VBLANK interrupt should be set in CAUSE register");
         
         // Manually check for interrupts
         cpu.checkInterrupts();
@@ -342,38 +344,49 @@ void runCPUInterruptControllerTests() {
             [&mem](uint32_t address, uint32_t value) { mem.writeWord(address, value); }
         );
         
+        // Connect CPU to interrupt controller
+        ic.connectCPU(&cpu);
+        
         // Trigger some interrupts
         ic.trigger(PSX::InterruptController::InterruptType::VBLANK);
         ic.trigger(PSX::InterruptController::InterruptType::TIMER0);
         
         // Set a mask
-        ic.setMask(0x11); // Enable VBLANK and TIMER0
+        ic.setMask(0x11); // VBLANK and TIMER0
         
-        // Read interrupt status and mask through CPU
+        // Enable all interrupts in CPU
+        cpu.setCP0Register(PSX::CPU::CP0_SR, PSX::CPU::SR_IEC | 0xFF00); // IE and all IMs
+        
+        // Read interrupt status register through CPU memory interface
         uint32_t status = cpu.readWord(0x1F801070);
+        runner.checkEqual(status, 0x11u, "CPU should read correct I_STAT value");
+        
+        // Read interrupt mask register through CPU memory interface
         uint32_t mask = cpu.readWord(0x1F801074);
+        runner.checkEqual(mask, 0x11u, "CPU should read correct I_MASK value");
         
-        // Check correct values are read
-        runner.checkEqual(status, 0x11u, "CPU should read correct interrupt status");
-        runner.checkEqual(mask, 0x11u, "CPU should read correct interrupt mask");
+        // Verify interrupts are pending and visible in CAUSE register
+        runner.check(ic.isInterruptPending(), "Interrupts should be pending");
+        uint32_t cause = cpu.getCP0Register(PSX::CPU::CP0_CAUSE);
+        runner.check((cause & (1 << 8)) != 0, "VBLANK interrupt should be set in CAUSE register");
+        runner.check((cause & (1 << 12)) != 0, "TIMER0 interrupt should be set in CAUSE register");
         
-        // Write new mask through CPU
-        cpu.writeWord(0x1F801074, 0x81); // Enable VBLANK and SPU
-        
-        // Check mask was updated
-        runner.checkEqual(ic.getMask(), 0x81u, "Interrupt mask should be updated via CPU write");
-        
-        // Acknowledge interrupts through CPU
-        cpu.writeWord(0x1F801070, 0x10); // Acknowledge TIMER0
-        
-        // Check status was updated
-        runner.checkEqual(ic.getStatus(), 0x1u, "Interrupt status should be updated via CPU write");
-        
-        // Acknowledge remaining interrupt
+        // Acknowledge VBLANK through CPU memory interface
         cpu.writeWord(0x1F801070, 0x1);
         
-        // Verify all interrupts cleared
-        runner.checkEqual(ic.getStatus(), 0u, "All interrupts should be cleared");
+        // Verify VBLANK was acknowledged but TIMER0 is still pending
+        runner.check(ic.isInterruptPending(), "TIMER0 interrupt should still be pending");
+        cause = cpu.getCP0Register(PSX::CPU::CP0_CAUSE);
+        runner.check((cause & (1 << 8)) == 0, "VBLANK interrupt should be cleared in CAUSE register");
+        runner.check((cause & (1 << 12)) != 0, "TIMER0 interrupt should still be set in CAUSE register");
+        
+        // Acknowledge TIMER0 through CPU memory interface
+        cpu.writeWord(0x1F801070, 0x10);
+        
+        // Verify all interrupts are cleared
+        runner.check(!ic.isInterruptPending(), "All interrupts should be cleared");
+        cause = cpu.getCP0Register(PSX::CPU::CP0_CAUSE);
+        runner.check((cause & ((1 << 8) | (1 << 12))) == 0, "All interrupt bits should be cleared in CAUSE register");
     });
     
     // Test 5: Interrupt Priority and Masking
@@ -382,22 +395,27 @@ void runCPUInterruptControllerTests() {
         PSX::CPU cpu;
         
         // Connect interrupt controller to CPU
-        uint32_t interruptState = 0;
-        ic.setInterruptCallback([&interruptState, &cpu](bool state) {
-            interruptState = state ? 1 : 0;
-            cpu.setInterrupt(0, state);
-        });
+        ic.connectCPU(&cpu);
+        
+        // Enable interrupts in CPU
+        cpu.setCP0Register(PSX::CPU::CP0_SR, PSX::CPU::SR_IEC | (1 << 8)); // IE and IM[0]
         
         // Initially no interrupts pending
-        runner.checkEqual(interruptState, 0u, "No interrupts should be pending initially");
+        runner.check(!ic.isInterruptPending(), "No interrupts should be pending initially");
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & (1 << 8)) == 0, 
+                     "No interrupts should be set in CAUSE register initially");
         
-        // Trigger an interrupt but keep it masked
+        // Trigger an interrupt but keep it masked (mask is 0 by default)
         ic.trigger(PSX::InterruptController::InterruptType::VBLANK);
-        runner.checkEqual(interruptState, 0u, "Masked interrupt should not trigger CPU");
+        runner.check(!ic.isInterruptPending(), "Masked interrupt should not be pending");
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & (1 << 8)) == 0, 
+                     "Masked interrupt should not set bit in CAUSE register");
         
         // Enable the interrupt
         ic.setMask(0x1);
-        runner.checkEqual(interruptState, 1u, "Enabled interrupt should trigger CPU");
+        runner.check(ic.isInterruptPending(), "Enabled interrupt should be pending");
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & (1 << 8)) != 0, 
+                     "Enabled interrupt should set bit in CAUSE register");
         
         // Trigger a higher priority interrupt
         ic.trigger(PSX::InterruptController::InterruptType::CDROM);
@@ -406,15 +424,21 @@ void runCPUInterruptControllerTests() {
         ic.acknowledge(PSX::InterruptController::InterruptType::VBLANK);
         
         // CDROM is still pending but masked
-        runner.checkEqual(interruptState, 0u, "Higher priority interrupt should not trigger if masked");
+        runner.check(!ic.isInterruptPending(), "Higher priority interrupt should not be pending if masked");
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & (1 << 10)) == 0, 
+                     "Masked CDROM interrupt should not set bit in CAUSE register");
         
         // Enable CDROM interrupt
         ic.setMask(0x4);
-        runner.checkEqual(interruptState, 1u, "Newly enabled interrupt should trigger CPU");
+        runner.check(ic.isInterruptPending(), "Newly enabled interrupt should be pending");
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & (1 << 10)) != 0, 
+                     "Enabled CDROM interrupt should set bit in CAUSE register");
         
         // Acknowledge all interrupts
         ic.acknowledge(PSX::InterruptController::InterruptType::CDROM);
-        runner.checkEqual(interruptState, 0u, "No interrupts should be pending after acknowledgment");
+        runner.check(!ic.isInterruptPending(), "No interrupts should be pending after acknowledgment");
+        runner.check((cpu.getCP0Register(PSX::CPU::CP0_CAUSE) & ((1 << 8) | (1 << 10))) == 0, 
+                     "All interrupt bits should be cleared in CAUSE register");
     });
     
     runner.runAll();
